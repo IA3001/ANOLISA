@@ -19,6 +19,12 @@ enum Commands {
         /// Keep only this category; may be repeated (the union is kept)
         #[arg(long)]
         category: Vec<String>,
+        /// Leave out this parameter; may be repeated
+        #[arg(long, conflicts_with = "only")]
+        exclude: Vec<String>,
+        /// Keep only this parameter; may be repeated
+        #[arg(long, conflicts_with = "exclude")]
+        only: Vec<String>,
         #[arg(long)]
         conservative: bool,
     },
@@ -94,8 +100,10 @@ fn main() {
     let result = match cli.command {
         Commands::Check {
             category: cats,
+            exclude,
+            only,
             conservative,
-        } => cmd_check(cats, conservative),
+        } => cmd_check(cats, conservative, exclude, only),
         Commands::Tune {
             dry_run,
             conservative,
@@ -167,7 +175,20 @@ fn print_error_json(body: &serde_json::Value) {
     let _ = std::io::Write::write_fmt(&mut stderr, format_args!("{rendered}\n"));
 }
 
-fn cmd_check(cats: Vec<String>, conservative: bool) -> Result<i32> {
+fn cmd_check(
+    cats: Vec<String>,
+    conservative: bool,
+    exclude: Vec<String>,
+    only: Vec<String>,
+) -> Result<i32> {
+    let selection = if !only.is_empty() {
+        Selection::Only(&only)
+    } else if !exclude.is_empty() {
+        Selection::Except(&exclude)
+    } else {
+        Selection::All
+    };
+
     for cat in &cats {
         category::validate_category(cat)?;
     }
@@ -184,6 +205,8 @@ fn cmd_check(cats: Vec<String>, conservative: bool) -> Result<i32> {
     if conservative {
         recs.retain(|r| r.confidence == rules::Confidence::High);
     }
+    let unmatched = selection.unmatched_report(&recs);
+    recs.retain(|rec| !selection.drops(&rec.param));
 
     let score = eval.score();
     let counts = category::RecCounts::from_recs(&recs);
@@ -191,7 +214,7 @@ fn cmd_check(cats: Vec<String>, conservative: bool) -> Result<i32> {
 
     let recs_json: Vec<serde_json::Value> = recs.iter().map(rec_json).collect();
 
-    let output = json!({
+    let mut output = json!({
         "score": score,
         "predicted_score": predicted_score,
         "total_checked": eval.total_checked,
@@ -212,6 +235,9 @@ fn cmd_check(cats: Vec<String>, conservative: bool) -> Result<i32> {
         "workload": format!("{workload}"),
         "services": detected_services,
     });
+    if let Some((key, names)) = unmatched {
+        output[key] = names;
+    }
     print_json(&output)?;
 
     let code = if recs.is_empty() { 0 } else { 1 };

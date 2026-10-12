@@ -14,6 +14,8 @@ ktuner check
 ktuner check --category net
 ktuner check --category net --category mem   # 可重复：取并集
 ktuner check --conservative    # 仅高置信度
+ktuner check --only vm.swappiness   # 只报告点名的参数
+ktuner check --exclude vm.dirty_ratio   # 报告除这一项外的所有参数
 
 # 应用建议（需要 root 权限）
 sudo ktuner tune --dry-run     # 预览，不做实际变更
@@ -102,6 +104,13 @@ sudo ktuner rollback <param> [<param>…]  # 回滚点名的已记录参数，�
 ——`tune --category net --category mem` 规划的是同一个并集。同一分类的别名
 （`net`、`network`、`网络`）重复给出时每个条目只保留一次；某个值不是已知
 分类时报错（exit 2）而不是被忽略。
+
+`check --only <param>` 和 `check --exclude <param>` 均可重复，且不能同时使用。
+它们在 `--category` 和 `--conservative` 之后筛选建议；参数名使用与 `fix`、`why`
+相同的匹配规则：sysctl 的斜杠/点号别名不区分大小写，网卡身份保留大小写。
+未命中筛选范围内任何建议的名字会出现在 `unmatched_only` 或
+`unmatched_exclude` 中，`score` 和 `total_checked` 仍描述整个系统；
+`predicted_score`、`counts` 和退出码描述筛选后的建议。不传这两个参数时，JSON 形状保持不变。
 
 ### tune 输出
 

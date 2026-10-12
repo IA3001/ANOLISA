@@ -55,6 +55,8 @@ ktuner check                   # 分数 + 所有建议
 ktuner check --category net    # 仅某一类别
 ktuner check --category net --category mem   # 可重复，取并集
 ktuner check --conservative    # 仅高置信度建议
+ktuner check --only vm.swappiness   # 只报告点名的参数
+ktuner check --exclude vm.dirty_ratio   # 报告除这一项外的所有参数
 
 # 预览改动但不应用（dry-run）
 sudo ktuner tune --dry-run
@@ -85,6 +87,13 @@ sudo ktuner rollback vm.swappiness net.core.somaxconn   # 回滚点名的已记�
 内核清零的互斥孪生时在 `would_clear` 中列出；参数不在计划里、不可写或运行时危险时，
 与 `sudo ktuner fix <param>` 给出完全相同的 stderr JSON 与退出码，因此预检不会
 与被预览的命令不一致。
+
+`ktuner check --only <param>` 和 `ktuner check --exclude <param>` 均可重复，且不能同时使用。
+它们在 `--category` 和 `--conservative` 之后筛选，并使用与 `fix`、`why` 相同的匹配规则：
+sysctl 的斜杠/点号别名不区分大小写，网卡身份则保留大小写。
+未命中筛选范围内任何建议的名字会出现在 `unmatched_only` 或 `unmatched_exclude` 中。
+`score` 和 `total_checked` 仍描述整个系统；`predicted_score`、`counts` 和退出码描述筛选后的建议。
+不传这两个参数时，现有 JSON 形状保持不变。
 
 所有输出为 stdout 上的 JSON，错误为 stderr 上的 JSON。退出码：`0` 成功、
 `1` check 发现可改进项或 rollback 仍有值未恢复、`2` 命令错误。

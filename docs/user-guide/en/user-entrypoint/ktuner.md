@@ -57,6 +57,8 @@ ktuner check                   # score + all recommendations
 ktuner check --category net    # limit to one category
 ktuner check --category net --category mem   # categories may be repeated; the union is kept
 ktuner check --conservative    # high-confidence recommendations only
+ktuner check --only vm.swappiness   # report only the named parameter
+ktuner check --exclude vm.dirty_ratio   # report everything but this parameter
 
 # Preview changes without applying (dry-run)
 sudo ktuner tune --dry-run
@@ -90,6 +92,17 @@ refuses exactly like `sudo ktuner fix <param>` — same stderr JSON, same exit
 code — when the parameter is outside the plan, unwritable, or
 runtime-dangerous, so the preview cannot disagree with the command it
 previews.
+
+`ktuner check --only <param>` and `ktuner check --exclude <param>` are
+repeatable and mutually exclusive. They filter after `--category` and
+`--conservative`, using the same matching as `fix` and `why` (sysctl
+slash/dot aliases are case-insensitive, while network interface identities
+preserve case).
+Names that match no recommendation in the filtered scope are returned in
+`unmatched_only` or `unmatched_exclude`. `score` and `total_checked` remain
+system-wide; `predicted_score`, `counts`, and the exit code describe the
+filtered recommendations. With neither option, the existing JSON shape is
+preserved.
 
 All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` success,
 `1` check found recommendations or rollback left values unrestored, `2` command error.

@@ -14,6 +14,8 @@ ktuner check
 ktuner check --category net
 ktuner check --category net --category mem   # repeatable: keep the union
 ktuner check --conservative    # high-confidence only
+ktuner check --only vm.swappiness   # report only the named parameter
+ktuner check --exclude vm.dirty_ratio   # report everything but this parameter
 
 # Apply recommendations (requires root)
 sudo ktuner tune --dry-run     # preview, no changes
@@ -106,6 +108,16 @@ categories, so `check --category net --category mem` is one run over both —
 and `tune --category net --category mem` plans the same union. Repeating the
 aliases of one category (`net`, `network`, `网络`) keeps each entry once, and
 a value that names no category is rejected (exit 2) instead of being ignored.
+
+`check --only <param>` and `check --exclude <param>` are repeatable and
+mutually exclusive. They filter recommendations after `--category` and
+`--conservative`; names use the same matching as `fix` and `why` (sysctl
+slash/dot aliases are case-insensitive, while network interface identities
+preserve case). A name that matches no recommendation in the filtered scope is
+reported in `unmatched_only` or `unmatched_exclude`. `score` and
+`total_checked` remain system-wide; `predicted_score`, `counts`, and the exit
+code describe the selected recommendations. Without either option, the JSON
+shape is unchanged.
 
 ### tune output
 
