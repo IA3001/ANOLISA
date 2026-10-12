@@ -3363,9 +3363,18 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
     }
 
     let names = store.list();
+    let had_skills = !names.is_empty();
+    let names = names
+        .into_iter()
+        .filter(|name| !enabled_only || store.get(name).is_some_and(|entry| entry.metadata.enabled))
+        .collect::<Vec<_>>();
 
     if names.is_empty() {
-        println!("No skills found in {}", source.display());
+        if enabled_only && had_skills {
+            println!("No enabled skills found in {}", source.display());
+        } else {
+            println!("No skills found in {}", source.display());
+        }
         return Ok(());
     }
 
@@ -3374,10 +3383,6 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
 
     for name in names {
         if let Some(entry) = store.get(name) {
-            if enabled_only && !entry.metadata.enabled {
-                continue;
-            }
-
             let status_icon = match &entry.parse_status {
                 skillfs_core::ParseStatus::Ok => "✓",
                 skillfs_core::ParseStatus::Degraded(_) => "⚠",
