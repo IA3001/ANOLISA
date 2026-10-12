@@ -178,10 +178,15 @@ impl JsonlProtocolEventWriter {
             queue_capacity
         };
 
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // The log path must not redirect privileged protocol-event appends.
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&path)?;
 
         let (tx, rx) = sync_channel::<ProtocolEvent>(capacity);
         let dropped = Arc::new(AtomicU64::new(0));
@@ -573,6 +578,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jsonl_writer_does_not_follow_a_symlinked_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        let log_path = dir.path().join("protocol-events.jsonl");
+        std::os::unix::fs::symlink(&victim, &log_path).unwrap();
+
+        let err = JsonlProtocolEventWriter::new(&log_path, 0)
+            .err()
+            .expect("a symlinked protocol event log must be refused");
+
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "untouched");
     }
 
     #[test]

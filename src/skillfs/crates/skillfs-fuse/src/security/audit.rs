@@ -358,9 +358,9 @@ pub fn serialize_event_jsonl(event: &SkillEvent) -> String {
 
 /// Best-effort JSONL audit sink.
 ///
-/// Construction opens the destination file in append mode and spawns a
-/// dedicated writer thread. `emit` is non-blocking: it runs `try_send` on a
-/// bounded channel and, when the channel is full or the writer has died,
+/// Construction opens the destination file in append mode without following a
+/// symlink and spawns a dedicated writer thread. `emit` is non-blocking: it
+/// runs `try_send` on a bounded channel and, when the channel is full or the writer has died,
 /// drops the event and bumps [`JsonlFileAuditSink::dropped_count`]. Sink
 /// failures never surface as filesystem errors.
 pub struct JsonlFileAuditSink {
@@ -382,10 +382,15 @@ impl JsonlFileAuditSink {
             config.queue_capacity
         };
 
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&config.path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // The log path must not redirect privileged audit appends.
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&config.path)?;
 
         let (tx, rx) = sync_channel::<SkillEvent>(capacity);
         let dropped = Arc::new(AtomicU64::new(0));
@@ -654,6 +659,23 @@ mod tests {
         let bogus = std::path::PathBuf::from("/nonexistent/skillfs/audit.jsonl");
         let err = JsonlFileAuditSink::new(AuditConfig::new(&bogus));
         assert!(err.is_err(), "expected creation to fail on unwritable path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jsonl_file_sink_does_not_follow_a_symlinked_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "untouched").unwrap();
+        let log_path = dir.path().join("audit.jsonl");
+        std::os::unix::fs::symlink(&victim, &log_path).unwrap();
+
+        let err = JsonlFileAuditSink::new(AuditConfig::new(&log_path))
+            .err()
+            .expect("a symlinked audit log must be refused");
+
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "untouched");
     }
 
     #[test]
