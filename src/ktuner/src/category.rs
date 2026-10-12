@@ -7,12 +7,9 @@ pub fn is_runtime_dangerous(param: &str) -> bool {
 pub fn param_subcategory(param: &str) -> &'static str {
     if param.starts_with("net.") || param.contains("conntrack") {
         "network"
-    } else if param.starts_with("vm.") {
+    } else if param.starts_with("vm.") || param.starts_with("transparent_hugepage/") {
         "memory"
-    } else if param.starts_with("block/")
-        || param.starts_with("transparent_hugepage/")
-        || param.starts_with("fs.inotify.")
-    {
+    } else if param.starts_with("block/") || param.starts_with("fs.inotify.") {
         "io"
     } else if param.starts_with("kernel.sched_")
         || param.starts_with("kernel.pid_")
@@ -224,7 +221,7 @@ mod tests {
         );
         assert_eq!(param_subcategory("vm.swappiness"), "memory");
         assert_eq!(param_subcategory("block/sda/scheduler"), "io");
-        assert_eq!(param_subcategory("transparent_hugepage/enabled"), "io");
+        assert_eq!(param_subcategory("transparent_hugepage/enabled"), "memory");
         assert_eq!(param_subcategory("fs.inotify.max_user_watches"), "io");
         assert_eq!(param_subcategory("kernel.sched_migration_cost_ns"), "cpu");
         assert_eq!(param_subcategory("kernel.pid_max"), "cpu");
@@ -501,6 +498,26 @@ mod tests {
             assert!(
                 filter_by_category(vec![rec(param)], "cpu").is_empty(),
                 "{param} is not a cpu knob"
+            );
+        }
+    }
+
+    #[test]
+    fn transparent_hugepage_knobs_subcategory_is_memory() {
+        for param in [
+            "transparent_hugepage/enabled",
+            "transparent_hugepage/defrag",
+            "transparent_hugepage/shmem_enabled",
+        ] {
+            assert_eq!(param_subcategory(param), "memory", "{param}");
+            assert_eq!(
+                filter_by_category(vec![rec(param)], "mem").len(),
+                1,
+                "{param} must surface under --category mem"
+            );
+            assert!(
+                filter_by_category(vec![rec(param)], "io").is_empty(),
+                "{param} is not an I/O knob"
             );
         }
     }
