@@ -8,7 +8,7 @@ use super::id_resolver::IdResolver;
 use super::semantic::{GenAISemanticEvent, OutputMessage};
 use crate::aggregator::{ConnectionId, ParsedRequest};
 use crate::analyzer::AnalysisResult;
-use crate::analyzer::token::{TokenParser, merge_usage};
+use crate::analyzer::token::{TokenParser, merge_usage_from_event};
 use crate::parser::sse::ParsedSseEvent;
 use crate::response_map::ResponseSessionMapper;
 use crate::runtime_metrics::StageTimer;
@@ -568,17 +568,21 @@ impl GenAIBuilder {
             }
         }
 
-        // Merge token usage across every event. Anthropic splits it: the
-        // `message_start` event carries input_tokens plus the cache counters
-        // while the terminal `message_delta` carries only output_tokens, so
-        // keeping the last usage-bearing event would record input as 0.
+        // Merge token usage across every event. Anthropic splits usage across
+        // `message_start` and `message_delta`; the latter can carry final
+        // input/cache values that correct the preliminary start snapshot.
         // The cache counters ride along into the enrichment: the live path
         // stores them and totals the billed input, so the drain path must
         // persist the same numbers for the same call.
         let usage = sse_events
             .iter()
-            .filter_map(|e| token_parser.parse_event(e))
-            .fold(None, merge_usage);
+            .fold(None, |usage, event| match event.json_body() {
+                Some(event_json) => match token_parser.parse_json(&event_json) {
+                    Some(parsed) => merge_usage_from_event(usage, parsed, &event_json),
+                    None => usage,
+                },
+                None => usage,
+            });
 
         let (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens) = match &usage {
             Some(u) => (
@@ -961,6 +965,24 @@ mod tests {
             "input_tokens from message_start must survive the message_delta"
         );
         assert_eq!(enrichment.output_tokens, Some(42));
+    }
+
+    #[test]
+    fn test_extract_sse_enrichment_uses_dashscope_terminal_input() {
+        let events = vec![
+            make_sse_event(
+                r#"{"type":"message_start","message":{"model":"qwen3.7-max","usage":{"input_tokens":19247,"output_tokens":0,"cache_creation_input_tokens":20351,"cache_read_input_tokens":0}}}"#,
+            ),
+            make_sse_event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"output_tokens":241,"cache_creation_input_tokens":20351,"cache_read_input_tokens":0}}"#,
+            ),
+        ];
+
+        let enrichment =
+            GenAIBuilder::extract_sse_enrichment(&events).expect("enrichment from DashScope SSE");
+        assert_eq!(enrichment.input_tokens, Some(6));
+        assert_eq!(enrichment.output_tokens, Some(241));
+        assert_eq!(enrichment.cache_creation_tokens, Some(20351));
     }
 
     /// A drained Anthropic stream must keep its output content and model, not
