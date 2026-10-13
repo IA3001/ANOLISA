@@ -698,15 +698,15 @@ impl Analyzer {
         pid: u32,
         comm: &str,
     ) -> Option<TokenRecord> {
-        let mut usage = sse_events
-            .iter()
-            .fold(None, |usage, event| match event.json_body() {
-                Some(event_json) => match self.token.parse_json(&event_json) {
-                    Some(parsed) => merge_usage_from_event(usage, parsed, &event_json),
-                    None => usage,
-                },
-                None => usage,
-            });
+        let mut usage = sse_events.iter().fold(None, |usage, event| {
+            let Some(parsed) = self.token.parse_event(event) else {
+                return usage;
+            };
+            match event.json_body() {
+                Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
+                None => crate::analyzer::token::merge_usage(usage, parsed),
+            }
+        });
 
         // The continuation buffer holds the bytes of events a TLS record split,
         // and a split event produces no `ParsedSseEvent` of its own. Its usage
@@ -729,11 +729,12 @@ impl Analyzer {
             usage = reassembled.events.iter().fold(usage, |usage, event| {
                 let parsed = self.token.parse_data(&event.data);
                 let event_json = serde_json::from_str::<serde_json::Value>(&event.data).ok();
-                match (parsed, event_json) {
-                    (Some(parsed), Some(event_json)) => {
-                        merge_usage_from_event(usage, parsed, &event_json)
-                    }
-                    _ => usage,
+                match parsed {
+                    Some(parsed) => match event_json {
+                        Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
+                        None => crate::analyzer::token::merge_usage(usage, parsed),
+                    },
+                    None => usage,
                 }
             });
             if usage.is_none() {
@@ -2078,6 +2079,19 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
     }
 
     #[test]
+    fn test_extract_token_from_sse_keeps_partial_event_scan_fallback() {
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            r#"{"usage":{"input_tokens":57,"output_tokens":3"#,
+        )];
+        let record = analyzer
+            .extract_token_from_sse(&events, None, 1234, "test")
+            .expect("partial SSE event should retain scanned token usage");
+        assert_eq!(record.input_tokens, 57);
+        assert_eq!(record.output_tokens, 3);
+    }
+
+    #[test]
     fn test_extract_token_from_sse_continuation_no_usage_returns_none() {
         // Continuation buffer with no parseable token data at all.
         let analyzer = Analyzer::new();
@@ -2091,16 +2105,15 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
 
     #[test]
     fn test_extract_token_from_sse_anthropic_official_merges_start_and_delta() {
-        // Dialect A: message_start carries input + cache, terminal message_delta
-        // carries only output_tokens. The merge must combine both instead of
-        // picking one event (which would drop output or drop input+cache).
+        // DashScope's terminal message_delta carries the final four usage
+        // counters; message_start provides the provisional input snapshot.
         let analyzer = Analyzer::new();
         let events = vec![
             create_test_event(
-                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"cache_creation_input_tokens\":5678,\"cache_read_input_tokens\":90,\"output_tokens\":1}}}",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"output_tokens\":1}}}",
             ),
             create_test_event(
-                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1234,\"output_tokens\":42,\"cache_creation_input_tokens\":5678,\"cache_read_input_tokens\":90}}",
             ),
         ];
         let record = analyzer
@@ -2117,7 +2130,7 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         let analyzer = Analyzer::new();
         let events = vec![
             create_test_event(
-                "{\"type\":\"message_start\",\"message\":{\"model\":\"qwen3.7-max\",\"usage\":{\"input_tokens\":19247,\"output_tokens\":0,\"cache_creation_input_tokens\":20351,\"cache_read_input_tokens\":0}}}",
+                "{\"type\":\"message_start\",\"message\":{\"model\":\"qwen3.7-max\",\"usage\":{\"input_tokens\":19247,\"output_tokens\":0}}}",
             ),
             create_test_event(
                 "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":6,\"output_tokens\":241,\"cache_creation_input_tokens\":20351,\"cache_read_input_tokens\":0}}",
@@ -2161,7 +2174,7 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
     fn a_continuation_terminal_delta_replaces_preliminary_input() {
         let analyzer = Analyzer::new();
         let events = vec![create_test_event(
-            "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":19247,\"output_tokens\":0,\"cache_creation_input_tokens\":20351}}}",
+            "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":19247,\"output_tokens\":0}}}",
         )];
         let continuation = b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":6,\"output_tokens\":241,\"cache_creation_input_tokens\":20351}}\n\n";
 

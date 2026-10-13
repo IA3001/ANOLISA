@@ -8,7 +8,7 @@ use super::id_resolver::IdResolver;
 use super::semantic::{GenAISemanticEvent, OutputMessage};
 use crate::aggregator::{ConnectionId, ParsedRequest};
 use crate::analyzer::AnalysisResult;
-use crate::analyzer::token::{TokenParser, merge_usage_from_event};
+use crate::analyzer::token::{TokenParser, merge_usage, merge_usage_from_event};
 use crate::parser::sse::ParsedSseEvent;
 use crate::response_map::ResponseSessionMapper;
 use crate::runtime_metrics::StageTimer;
@@ -574,15 +574,15 @@ impl GenAIBuilder {
         // The cache counters ride along into the enrichment: the live path
         // stores them and totals the billed input, so the drain path must
         // persist the same numbers for the same call.
-        let usage = sse_events
-            .iter()
-            .fold(None, |usage, event| match event.json_body() {
-                Some(event_json) => match token_parser.parse_json(&event_json) {
-                    Some(parsed) => merge_usage_from_event(usage, parsed, &event_json),
-                    None => usage,
-                },
-                None => usage,
-            });
+        let usage = sse_events.iter().fold(None, |usage, event| {
+            let Some(parsed) = token_parser.parse_event(event) else {
+                return usage;
+            };
+            match event.json_body() {
+                Some(event_json) => merge_usage_from_event(usage, parsed, &event_json),
+                None => merge_usage(usage, parsed),
+            }
+        });
 
         let (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens) = match &usage {
             Some(u) => (
@@ -765,17 +765,17 @@ mod tests {
     }
 
     /// The drain enrichment must carry the cache counters the stream reported,
-    /// as the provider reported them: Anthropic's `message_start` keeps them
+    /// as the provider reported them: Anthropic's terminal usage keeps them
     /// outside `input_tokens`, while OpenAI-style usage counts the cached part
     /// inside `prompt_tokens` and only details it separately.
     #[test]
     fn test_extract_sse_enrichment_carries_usage_cache_counters() {
         let anthropic = vec![
             make_sse_event(
-                r#"{"type":"message_start","message":{"id":"msg_cache","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":1,"cache_creation_input_tokens":1234,"cache_read_input_tokens":24576}}}"#,
+                r#"{"type":"message_start","message":{"id":"msg_cache","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
             ),
             make_sse_event(
-                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1234,"cache_read_input_tokens":24576}}"#,
             ),
         ];
         let enrichment = GenAIBuilder::extract_sse_enrichment(&anthropic).expect("enrichment");
@@ -944,16 +944,27 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_sse_enrichment_keeps_partial_usage_scan_fallback() {
+        let events = vec![make_sse_event(
+            r#"{"usage":{"input_tokens":57,"output_tokens":3"#,
+        )];
+        let enrichment = GenAIBuilder::extract_sse_enrichment(&events)
+            .expect("partial SSE event should retain scanned token usage");
+        assert_eq!(enrichment.input_tokens, Some(57));
+        assert_eq!(enrichment.output_tokens, Some(3));
+    }
+
+    #[test]
     fn test_extract_sse_enrichment_merges_anthropic_split_usage() {
         let events = vec![
             make_sse_event(
-                r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1,"cache_creation_input_tokens":5678,"cache_read_input_tokens":90}}}"#,
+                r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1234,"output_tokens":1}}}"#,
             ),
             make_sse_event(
                 r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
             ),
             make_sse_event(
-                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42}}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":1234,"output_tokens":42,"cache_creation_input_tokens":5678,"cache_read_input_tokens":90}}"#,
             ),
         ];
 
