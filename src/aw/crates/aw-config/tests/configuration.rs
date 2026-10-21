@@ -318,6 +318,70 @@ fn yaml_rejects_duplicate_keys_tags_merge_keys_non_string_keys_and_multiple_docu
 }
 
 #[test]
+fn yaml_rejects_decimal_integer_literals_outside_the_128_bit_range() {
+    for (input, literal) in [
+        (
+            "value: 340282366920938463463374607431768211456",
+            "340282366920938463463374607431768211456",
+        ),
+        (
+            "value: 10000000000000000000000000000000000000000",
+            "10000000000000000000000000000000000000000",
+        ),
+        (
+            "value: -170141183460469231731687303715884105729",
+            "-170141183460469231731687303715884105729",
+        ),
+        (
+            r#"{"value":340282366920938463463374607431768211456}"#,
+            "340282366920938463463374607431768211456",
+        ),
+    ] {
+        let error = aw_config::parse_value(input.as_bytes()).unwrap_err();
+        assert!(!error.to_string().contains(literal), "{input}");
+        let Error::Document {
+            reason,
+            line,
+            column,
+        } = error
+        else {
+            panic!("expected a document error for {input}");
+        };
+        assert_eq!(reason, "integer is outside the supported range", "{input}");
+        assert!(line.is_some() && column.is_some(), "{input}");
+    }
+}
+
+#[test]
+fn yaml_integer_range_check_preserves_float_syntax_and_opaque_scalars() {
+    for input in [
+        "value: 1e40",
+        "value: 1.5e30",
+        "value: 1.7976931348623157e308",
+        "value: !!float 18446744073709551616",
+        "value: 18446744073709551615",
+        "# comment: 340282366920938463463374607431768211456\nvalue: 1.0",
+        "value: '340282366920938463463374607431768211456'",
+        "value: \"340282366920938463463374607431768211456\"",
+        "value: |\n  340282366920938463463374607431768211456\n",
+    ] {
+        assert!(aw_config::parse_value(input.as_bytes()).is_ok(), "{input}");
+    }
+}
+
+#[test]
+fn yaml_integer_range_check_follows_anchored_scalars_and_aliases() {
+    let input = "first: &wide 340282366920938463463374607431768211456\nsecond: *wide\n";
+    assert!(matches!(
+        aw_config::parse_value(input.as_bytes()),
+        Err(Error::Document {
+            reason: "integer is outside the supported range",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn errors_locate_invalid_fields_without_echoing_secret_values() {
     let mut value = example();
     value["spec"]["providers"]["security"]["timeout_ms"] = json!("sensitive-value-123");

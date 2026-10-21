@@ -1,14 +1,19 @@
 //! Parse into the JSON data model without losing duplicate keys or YAML types.
 
 use crate::{Error, MAX_DEPTH, MAX_DOCUMENT_BYTES};
-use serde::de::{self, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, Visitor};
+use serde::de::{
+    self, DeserializeSeed, Deserializer, EnumAccess, IgnoredAny, MapAccess, SeqAccess, Visitor,
+};
+use serde::Deserialize;
 use serde_json::{Map, Number, Value};
+use std::cell::Cell;
 use std::fmt;
 
 #[derive(Default)]
 struct Budget {
     expanded: usize,
     reason: Option<&'static str>,
+    contains_float: bool,
 }
 
 impl Budget {
@@ -89,6 +94,7 @@ impl<'de> Visitor<'de> for Checked<'_> {
 
     fn visit_f64<E: de::Error>(mut self, value: f64) -> Result<Value, E> {
         self.value_only()?;
+        self.budget.contains_float = true;
         Number::from_f64(value)
             .map(Value::Number)
             .ok_or_else(|| self.budget.fail("non-finite numbers are not JSON values"))
@@ -139,6 +145,167 @@ impl<'de> Visitor<'de> for Checked<'_> {
     }
 }
 
+struct SourceValue<'a> {
+    parsed: &'a Value,
+    out_of_range: &'a Cell<bool>,
+}
+
+impl<'de> DeserializeSeed<'de> for SourceValue<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        match self.parsed {
+            Value::Array(values) => deserializer.deserialize_seq(SourceSequence {
+                values,
+                out_of_range: self.out_of_range,
+            }),
+            Value::Object(values) => deserializer.deserialize_map(SourceMap {
+                values,
+                out_of_range: self.out_of_range,
+            }),
+            Value::Number(number) if number.is_f64() => {
+                deserializer.deserialize_str(DecimalInteger(self.out_of_range))
+            }
+            _ => IgnoredAny::deserialize(deserializer).map(|_| ()),
+        }
+    }
+}
+
+struct SourceSequence<'a> {
+    values: &'a [Value],
+    out_of_range: &'a Cell<bool>,
+}
+
+impl<'de> Visitor<'de> for SourceSequence<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("the sequence from the checked YAML document")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+        for value in self.values {
+            if sequence
+                .next_element_seed(SourceValue {
+                    parsed: value,
+                    out_of_range: self.out_of_range,
+                })?
+                .is_none()
+            {
+                return Err(de::Error::custom(
+                    "YAML sequence changed during source check",
+                ));
+            }
+        }
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(de::Error::custom(
+                "YAML sequence changed during source check",
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct SourceMap<'a> {
+    values: &'a Map<String, Value>,
+    out_of_range: &'a Cell<bool>,
+}
+
+impl<'de> Visitor<'de> for SourceMap<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("the mapping from the checked YAML document")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut entries = 0;
+        while let Some(key) = map.next_key::<String>()? {
+            let Some(value) = self.values.get(&key) else {
+                return Err(de::Error::custom(
+                    "YAML mapping changed during source check",
+                ));
+            };
+            map.next_value_seed(SourceValue {
+                parsed: value,
+                out_of_range: self.out_of_range,
+            })?;
+            entries += 1;
+        }
+        if entries != self.values.len() {
+            return Err(de::Error::custom(
+                "YAML mapping changed during source check",
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct DecimalInteger<'a>(&'a Cell<bool>);
+
+impl<'de> Visitor<'de> for DecimalInteger<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a YAML scalar")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<(), E> {
+        if is_unrepresentable_decimal_integer(value) {
+            self.0.set(true);
+            Err(E::custom("integer is outside the supported range"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn is_unrepresentable_decimal_integer(value: &str) -> bool {
+    let (negative, digits) = if let Some(digits) = value.strip_prefix('-') {
+        (true, digits)
+    } else {
+        (false, value.strip_prefix('+').unwrap_or(value))
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    if negative {
+        value.parse::<i128>().is_err()
+    } else {
+        digits.parse::<u128>().is_err()
+    }
+}
+
+fn check_integer_literals(input: &str, parsed: &Value) -> Result<(), Error> {
+    let out_of_range = Cell::new(false);
+    let mut documents = serde_yaml_ng::Deserializer::from_str(input);
+    let Some(document) = documents.next() else {
+        return Err(Error::Document {
+            reason: "expected one document",
+            line: None,
+            column: None,
+        });
+    };
+    if let Err(error) = (SourceValue {
+        parsed,
+        out_of_range: &out_of_range,
+    })
+    .deserialize(document)
+    {
+        let location = error.location();
+        return Err(Error::Document {
+            reason: if out_of_range.get() {
+                "integer is outside the supported range"
+            } else {
+                "could not inspect YAML source scalars"
+            },
+            line: location.as_ref().map(|location| location.line()),
+            column: location.as_ref().map(|location| location.column()),
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn parse(input: &[u8]) -> Result<Value, Error> {
     let invalid = |reason| Error::Document {
         reason,
@@ -167,6 +334,11 @@ pub(super) fn parse(input: &[u8]) -> Result<Value, Error> {
     })?;
     if documents.next().is_some() {
         return Err(invalid("expected exactly one document"));
+    }
+    // The checked value keeps the numeric type but not the source spelling.
+    // Re-read only when floats exist and inspect those scalar nodes in context.
+    if budget.contains_float {
+        check_integer_literals(input, &value)?;
     }
     // Alias expansion has an incremental budget above. Also bound the exact
     // serialized size, including escaping, punctuation and numeric spellings.
