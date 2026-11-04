@@ -13,15 +13,21 @@ use std::{
 };
 
 /// Validate an absolute path without symbolic ancestors.
+///
+/// The path is rebuilt from its components before the walk. A trailing separator or `/.`
+/// makes `lstat` resolve a final symlink as a directory, so `/path/link/` reports as a
+/// plain directory and would pass; the rebuilt path always ends in the name `is_symlink`
+/// has to inspect.
 pub fn absolute(path: &Path) -> Result<()> {
     require(
         path.is_absolute() && !path.components().any(|p| matches!(p, Component::ParentDir)),
         format!("expected absolute path without '..': {}", path.display()),
     )?;
-    for parent in path.ancestors() {
+    let normalized: std::path::PathBuf = path.components().collect();
+    for parent in normalized.ancestors() {
         require(
             !parent.is_symlink(),
-            format!("symlink in installation path: {}", parent.display()),
+            format!("symlink in installation path: {}", path.display()),
         )?;
     }
     Ok(())
@@ -155,6 +161,33 @@ pub fn verify_payload_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_trailing_separator_spelling_of_a_final_symlink_is_rejected() {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/package-fixtures");
+        fs::create_dir_all(&target).unwrap();
+        // `absolute` rejects `..`, so anchor the fixture on the canonical base.
+        let target = fs::canonicalize(&target).unwrap();
+        let directory = tempfile::tempdir_in(&target).unwrap();
+        let real = directory.path().join("real");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, directory.path().join("link")).unwrap();
+
+        absolute(&real).unwrap();
+        for spelling in ["link", "link/", "link///", "link/.", "link/./"] {
+            let path = directory.path().join(spelling);
+            let error = absolute(&path).expect_err(spelling);
+            assert!(
+                error.to_string().contains("symlink in installation path"),
+                "{spelling}: {error}"
+            );
+        }
+        let traversal = directory.path().join("link/../real");
+        assert!(
+            absolute(&traversal).is_err(),
+            "parent traversal must stay rejected"
+        );
+    }
 
     #[test]
     fn failed_lock_acquisition_or_validation_leaves_no_published_lock() {
