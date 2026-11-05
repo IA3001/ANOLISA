@@ -34,6 +34,8 @@ import sys
 import xml.dom.minidom
 import xml.etree.ElementTree as ET
 
+import shared_strings_builder
+
 NS_SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
@@ -110,7 +112,7 @@ def add_shared_string(work_dir: str, text: str) -> int:
     si = ET.SubElement(root, _tag("si"))
     t = ET.SubElement(si, _tag("t"))
     t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    t.text = text
+    t.text = shared_strings_builder.encode_for_storage(text)
 
     root.set("count", str(int(root.get("count", "0")) + 1))
     root.set("uniqueCount", str(int(root.get("uniqueCount", "0")) + 1))

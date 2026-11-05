@@ -49,14 +49,22 @@ UNSTORABLE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\r]")
 LITERAL_ESCAPE_RE = re.compile(r"_x")
 
 
+def encode_for_storage(s: str) -> str:
+    """Encode a string as OOXML stores it, leaving XML escaping to the caller.
+
+    Callers that hand the value to ElementTree must not XML-escape it: the
+    writer does that once, and escaping here first would double it.
+    """
+    encoded = LITERAL_ESCAPE_RE.sub("_x005F_x", s)
+    return UNSTORABLE_RE.sub(lambda m: f"_x{ord(m.group()):04X}_", encoded)
+
+
 def escape_text(s: str) -> tuple[str, bool]:
     """
     Return (escaped_text, needs_preserve).
     needs_preserve is True if the string has leading or trailing whitespace.
     """
-    encoded = LITERAL_ESCAPE_RE.sub("_x005F_x", s)
-    encoded = UNSTORABLE_RE.sub(lambda m: f"_x{ord(m.group()):04X}_", encoded)
-    escaped = html.escape(encoded, quote=False)
+    escaped = html.escape(encode_for_storage(s), quote=False)
     needs_preserve = s != s.strip()
     return escaped, needs_preserve
 
