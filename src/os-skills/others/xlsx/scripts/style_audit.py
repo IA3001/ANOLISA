@@ -24,6 +24,7 @@ Exit code:
 
 import sys
 import os
+import posixpath
 import zipfile
 import xml.etree.ElementTree as ET
 import json
@@ -396,7 +397,22 @@ def _audit(styles_xml: bytes, sheet_xmls: list[tuple[str, bytes]]) -> dict:
     return results
 
 
-def _load_from_xlsx(xlsx_path: str) -> tuple[bytes, list[tuple[str, bytes]]]:
+def _resolve_sheet_target(target: str) -> str:
+    """Resolve a `workbook.xml.rels` Target to its member name in the package.
+
+    OPC allows a Target to be relative to the part owning the rels
+    (`worksheets/sheet1.xml`), to carry `.`/`..` segments
+    (`./worksheets/sheet1.xml`), or to be package-absolute
+    (`/xl/worksheets/sheet1.xml`). Anything but the plain relative form
+    produced a member name absent from the archive, and the loader dropped
+    that sheet without saying so.
+    """
+    if target.startswith("/"):
+        return posixpath.normpath(target).lstrip("/")
+    return posixpath.normpath(posixpath.join("xl", target))
+
+
+def _load_from_xlsx(xlsx_path: str) -> tuple[bytes, list[tuple[str, bytes]], list[str]]:
     """Load styles.xml and all sheet XMLs from a packed xlsx file."""
     with zipfile.ZipFile(xlsx_path, "r") as z:
         styles_xml = z.read("xl/styles.xml")
@@ -419,22 +435,23 @@ def _load_from_xlsx(xlsx_path: str) -> tuple[bytes, list[tuple[str, bytes]]]:
             rid = rel.get("Id", "")
             target = rel.get("Target", "")
             if "worksheets" in target:
-                # Package-absolute targets start with / (e.g. /xl/worksheets/sheet1.xml)
-                target = target.lstrip("/")
-                if not target.startswith("xl/"):
-                    target = "xl/" + target
-                rid_to_path[rid] = target
+                rid_to_path[rid] = _resolve_sheet_target(target)
 
         sheet_xmls = []
+        unreadable = []
         for rid, name in rid_to_name.items():
             path = rid_to_path.get(rid)
             if path and path in z.namelist():
                 sheet_xmls.append((name, z.read(path)))
+            else:
+                # Dropping it silently let a partial audit report PASS over the
+                # sheets it did read, with nothing saying one was skipped.
+                unreadable.append(f"{name} ({path or 'no relationship'})")
 
-    return styles_xml, sheet_xmls
+    return styles_xml, sheet_xmls, unreadable
 
 
-def _load_from_dir(unpacked_dir: str) -> tuple[bytes, list[tuple[str, bytes]]]:
+def _load_from_dir(unpacked_dir: str) -> tuple[bytes, list[tuple[str, bytes]], list[str]]:
     """Load styles.xml and all sheet XMLs from an unpacked directory."""
     styles_path = os.path.join(unpacked_dir, "xl", "styles.xml")
     with open(styles_path, "rb") as f:
@@ -461,19 +478,20 @@ def _load_from_dir(unpacked_dir: str) -> tuple[bytes, list[tuple[str, bytes]]]:
             rid_to_path[rid] = target
 
     sheet_xmls = []
-    ws_dir = os.path.join(unpacked_dir, "xl", "worksheets")
+    unreadable = []
     for rid, name in rid_to_name.items():
         rel_path = rid_to_path.get(rid, "")
-        # rel_path may be "worksheets/sheet1.xml" or absolute path
-        if rel_path.startswith("worksheets/"):
-            full = os.path.join(unpacked_dir, "xl", rel_path)
+        if rel_path:
+            full = os.path.join(unpacked_dir, _resolve_sheet_target(rel_path))
         else:
-            full = os.path.join(unpacked_dir, "xl", "worksheets", os.path.basename(rel_path))
-        if os.path.exists(full):
+            full = ""
+        if full and os.path.exists(full):
             with open(full, "rb") as f:
                 sheet_xmls.append((name, f.read()))
+        else:
+            unreadable.append(f"{name} ({rel_path or 'no relationship'})")
 
-    return styles_xml, sheet_xmls
+    return styles_xml, sheet_xmls, unreadable
 
 
 def main() -> None:
@@ -489,9 +507,9 @@ def main() -> None:
 
     try:
         if os.path.isdir(target):
-            styles_xml, sheet_xmls = _load_from_dir(target)
+            styles_xml, sheet_xmls, unreadable = _load_from_dir(target)
         elif target.endswith(".xlsx") or target.endswith(".xlsm"):
-            styles_xml, sheet_xmls = _load_from_xlsx(target)
+            styles_xml, sheet_xmls, unreadable = _load_from_xlsx(target)
         else:
             print(f"ERROR: unrecognized target '{target}' — must be .xlsx file or unpacked directory")
             sys.exit(1)
@@ -502,6 +520,15 @@ def main() -> None:
     if not sheet_xmls:
         # Auditing zero sheets would report PASS without checking anything
         print(f"ERROR: no worksheets could be loaded from {target}")
+        sys.exit(1)
+
+    if unreadable:
+        # Same reason, one sheet smaller: a partial audit is not a pass, and
+        # silence here is what let a skipped sheet look like a clean one.
+        print(f"ERROR: {len(unreadable)} declared worksheet(s) could not be read "
+              f"from {target}; the audit would be incomplete:")
+        for entry in unreadable:
+            print(f"  [FAIL] {entry}")
         sys.exit(1)
 
     results = _audit(styles_xml, sheet_xmls)
