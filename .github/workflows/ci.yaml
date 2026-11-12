@@ -1149,6 +1149,17 @@ jobs:
       - name: Test adapter installers
         run: |
           make -C src/tokenless test-adapters
+      # `make test-install-methods` (npm postinstall, the installer script, and
+      # the documented behaviour of every adapter) was never called by a job:
+      # a broken install contract only showed up on a developer machine.
+      # `test-install-docs.sh` alone carries 340 assertions over the component
+      # manifests, the user docs, install.sh, uninstall.sh and each adapter's
+      # install/uninstall contract -- including that the os-skills bundle still
+      # declares every skill the RPM ships. It is plain bash over the repository
+      # tree; a PATH holding only bash and coreutils is enough, so it costs well
+      # under a second and needs no build output.
+      - name: Test documented install contracts
+        run: make -C src/tokenless test-install-docs
 
       - name: npm packaging smoke test (native Linux)
         run: |
