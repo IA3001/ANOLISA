@@ -28,6 +28,21 @@ jobs:
           python-version: '3.11'
       - name: Install component test dependencies
         run: python3 -m pip install -r src/os-skills/tests/requirements.txt
+      - name: Run tests that live beside the script they cover
+        # `discover -s src/os-skills/tests` cannot reach these: the component
+        # path contains a hyphen, so discovery skips it, and unittest only
+        # descends into packages. They were therefore written, kept correct by
+        # hand, and never run by CI. Moving them into src/os-skills/tests is the
+        # eventual fix (see the guard in that directory); until then this loop
+        # runs whatever is still beside its script, and goes quiet once they
+        # are moved.
+        run: |
+          failed=0
+          while IFS= read -r suite; do
+            echo "== $suite"
+            python3 "$suite" || failed=1
+          done < <(find src/os-skills -path '*/scripts/test_*.py' | sort)
+          exit "$failed"
       - name: Verify raw package and action
         run: |
           python3 -m unittest discover -s src/os-skills/tests
