@@ -175,9 +175,34 @@ def infer_failure_reason(grading: dict, scores: dict) -> list:
     return reasons
 
 
+CONVERTER_EFFICIENCY_KEYS = (
+    "efficiency_turns",
+    "efficiency_tokens",
+    "efficiency_wall_time_s",
+)
+
+
+def report_scores(grading: dict, trace_end: dict) -> dict:
+    """Dimension scores for a report, with the converter's efficiency values.
+
+    `grade()` never receives the session totals, so `grading_result` carries the
+    efficiency dimensions at 0.0 and a report built from that event alone claims
+    every trial was maximally token- and time-efficient. The converter writes the
+    real values to `trace_end.scores`, so prefer those and keep the grader's
+    rubric dimensions.
+    """
+    scores = dict((grading or {}).get("scores", {}) or {})
+    converter = (trace_end or {}).get("scores", {}) or {}
+    for key in CONVERTER_EFFICIENCY_KEYS:
+        value = converter.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            scores[key] = value
+    return scores
+
+
 def llm_classify_failure(task_info: dict, grading: dict, trace_end: dict,
                          api_key: str, base_url: str, model_id: str) -> dict:
-    scores = grading.get("scores", {})
+    scores = report_scores(grading, trace_end)
     task_score = grading.get("task_score", 0)
 
     judge_reasons = []
@@ -270,7 +295,7 @@ def generate_reports(trace_dir: str, tasks_dir: str, report_dir: str,
         task_info = load_task_info(task_id, tasks_dir)
         grading, trace_end = load_grading_result(trace_path)
 
-        scores = grading.get("scores", {}) if grading else {}
+        scores = report_scores(grading, trace_end) if grading else {}
         passed = grading.get("passed", False) if grading else False
         task_score = grading.get("task_score", 0) if grading else 0
         trial_id = trace_filename.replace(".jsonl", "").rsplit("_", 1)[-1]

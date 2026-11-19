@@ -1,0 +1,20 @@
+fix(benchmark): report real efficiency scores
+
+`grade()` never receives the session totals, so `grading_result` carries
+`efficiency_turns`, `efficiency_tokens` and `efficiency_wall_time_s` at
+their 0.0 defaults. Both report generators built their `scores` from that
+event, so every generated report claimed the trial was maximally
+token- and time-efficient.
+
+`report_scores()` starts from the grading scores and overlays the three
+efficiency keys from `trace_end.scores`, which the converter writes from
+the session totals. Rubric dimensions still come from the grader, and a
+trace without converter scores keeps the previous behaviour.
+
+User-visible changes:
+- Generated trial reports show the measured efficiency values instead of
+  the grader's zeros.
+
+Fixes: 4a8fea76f ("refactor(chore): separate repository source roles")
+Assisted-by: DSH:0.2.1-rc.5
+Signed-off-by: IA3000 <b6497300525@163.com>
